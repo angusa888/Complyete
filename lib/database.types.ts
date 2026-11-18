@@ -50,6 +50,7 @@ export type Database = {
       enqueue_reminder_delivery: {Args: {p_deadline_id: string; p_revision: number; p_stage: string; p_occurrence_date: string; p_recipient_email: string; p_recipient_staff_ids: string[]; p_payload: Json}; Returns: string};
       claim_reminder_deliveries: {Args: {p_limit?: number; p_now?: string}; Returns: Delivery[]};
       record_reminder_result: {Args: {p_delivery_id: string; p_lease_token: string; p_result: string; p_provider_id?: string | null; p_error?: string | null; p_metadata?: Json; p_now?: string}; Returns: undefined};
+      save_preset_group: {Args: {p_group_id: string | null; p_name: string; p_description: string | null; p_intake_fields: Json; p_items: Json}; Returns: string};
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
