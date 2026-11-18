@@ -147,7 +147,7 @@ describe("HTTP service authorization and IO boundaries", () => {
   it("defaults preview with no enqueue, claim, result or provider request", async () => {
     const { fetcher } = mockService();
     const response = await createReminderHandler((key) => config[key], fetcher, () => now)(request());
-    const body = await response.json();
+    const body = await response.json() as { mode: string; sends_enabled: boolean; previews: unknown[] };
     expect(response.status).toBe(200); expect(body.mode).toBe("preview"); expect(body.sends_enabled).toBe(false);
     expect(body.previews).toHaveLength(1);
     expect(fetcher.mock.calls.every(([url, init]) => !String(url).includes("/rpc/") && !String(url).includes("resend.com") && init?.method === "GET")).toBe(true);
@@ -180,7 +180,8 @@ describe("HTTP service authorization and IO boundaries", () => {
   it("sends only frozen demo payloads with stable keys and records genuine provider success", async () => {
     const { fetcher, records } = mockService();
     const response = await createReminderHandler((key) => key === "REMINDER_MODE" ? "demo" : config[key], fetcher, () => now)(request());
-    expect((await response.json()).sent).toBe(2);
+    const body = await response.json() as { sent: number };
+    expect(body.sent).toBe(2);
     const calls = fetcher.mock.calls.filter(([url]) => String(url).includes("resend.com"));
     expect(calls).toHaveLength(2);
     expect(JSON.parse(String(calls[0][1]?.body)).to).toBe("revisa@rpi.edu");
