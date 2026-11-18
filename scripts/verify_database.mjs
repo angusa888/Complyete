@@ -35,7 +35,7 @@ await db.exec(`
  grant select on public.clients to anon;
  create policy "anyone can read clients for now" on public.clients for select to anon using(true);
 `);
-for (const filename of ['001_schema.sql','002_security.sql','003_workflows.sql','004_reminders.sql']) {
+for (const filename of ['001_schema.sql','002_security.sql','003_workflows.sql','004_reminders.sql','005_reminder_reopen_revision.sql']) {
   const sql = (await readFile(resolve(root, 'supabase/migrations', filename), 'utf8')).replace(/create extension if not exists pgcrypto;/i, '-- PGlite uses the built-in gen_random_uuid().');
   try { await db.exec(sql); console.log(`APPLIED ${filename}`); }
   catch (error) { console.error(`FAILED ${filename}: ${error.message}`); throw error; }
@@ -147,6 +147,122 @@ await check('reminder service atomic idempotence, leasing, transient retry, stal
  await q('update deadlines set due_date=due_date+1 where id=$1',[d.id]);
  assert.equal((await one('select state from reminder_deliveries where id=$1',[lease.id])).state,'cancelled');
 }));
+// Reuse one exact occurrence across lifecycle changes; only the database revision may differ.
+let reminderCycle;
+async function enqueueCycle(revision, stage='notice_30') {
+ return role('service_role',null,async()=>{
+  const {id}=await one('select enqueue_reminder_delivery($1,$2,$3,$4,$5,$6,$7) id',[reminderCycle.id,revision,stage,'2026-11-18','staff@example.invalid',[staff.id],{to:'staff@example.invalid',subject:'Reopen validation',html:'Reopen validation'}]);
+  return id ? one('select * from reminder_deliveries where id=$1',[id]) : null;
+ });
+}
+await check('explicit deadline reopen creates a fresh idempotent cycle and preserves sent history',async()=>{
+ reminderCycle=await role('authenticated',user,async()=>{
+  const p=await one("insert into projects(title) values('Reminder lifecycle validation') returning id");
+  const d=await one("insert into deadlines(project_id,kind,label,due_date) values($1,'permit','Lifecycle permit','2026-12-18') returning id",[p.id]);
+  await q('insert into deadline_recipients(deadline_id,staff_id) values($1,$2)',[d.id,staff.id]);
+  const req=await one("insert into document_requirements(project_id,deadline_id,label) values($1,$2,'Signed lifecycle permit') returning id",[p.id,d.id]);
+  const doc=await one("insert into documents(project_id,title,category) values($1,'Lifecycle evidence','Permits') returning id",[p.id]);
+  const v=await one("select * from begin_document_upload($1,'signed.pdf','application/pdf',100)",[doc.id]);
+  await q("insert into storage.objects(bucket_id,name,metadata) values('project-documents',$1,$2)",[v.object_path,{size:100}]);
+  await q('select finalize_document_upload($1)',[v.id]);
+  await q('select verify_document_requirement($1,$2)',[req.id,v.id]);
+  return {...await one('select * from deadlines where id=$1',[d.id]),version_id:v.id};
+ });
+ const first=await enqueueCycle(reminderCycle.revision);
+ await role('service_role',null,async()=>{
+  const lease=await one('select * from claim_reminder_deliveries(1,$1)',['2027-01-01T15:00:00Z']);
+  assert.equal(lease.id,first.id);
+  await q("select record_reminder_result($1,$2,'sent','provider-lifecycle',null,$3,$4)",[lease.id,lease.lease_token,{},'2027-01-01T15:00:00Z']);
+ });
+ reminderCycle.sent=await one('select * from reminder_deliveries where id=$1',[first.id]);
+ reminderCycle.attempts=await q('select * from reminder_attempts where delivery_id=$1',[first.id]);
+ const pending=await enqueueCycle(reminderCycle.revision,'notice_14');
+ await role('authenticated',user,async()=>{
+  await q('select satisfy_deadline($1)',[reminderCycle.id]);
+  assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+  await q('update deadlines set satisfied_at=null,satisfied_by=null where id=$1',[reminderCycle.id]);
+ });
+ const reopened=await one('select * from deadlines where id=$1',[reminderCycle.id]);
+ assert.equal(reopened.revision,reminderCycle.revision+1);
+ assert.equal(reopened.satisfied_at,null);
+ assert.equal((await one('select state from reminder_deliveries where id=$1',[pending.id])).state,'cancelled');
+ for (const previous of [first,pending]) {
+  const fresh=await enqueueCycle(reopened.revision,previous.stage);
+  assert.notEqual(fresh.id,previous.id);
+  assert.notEqual(fresh.idempotency_key,previous.idempotency_key);
+  assert.equal((await enqueueCycle(reopened.revision,previous.stage)).id,fresh.id);
+ }
+ assert.equal(await enqueueCycle(reminderCycle.revision),null);
+ assert.deepEqual(await one('select * from reminder_deliveries where id=$1',[first.id]),reminderCycle.sent);
+ assert.deepEqual(await q('select * from reminder_attempts where delivery_id=$1',[first.id]),reminderCycle.attempts);
+ reminderCycle.revision=reopened.revision;
+ await role('authenticated',user,async()=>{
+  await q('update deadlines set satisfied_at=null,archived_at=null,label=label,due_date=due_date,notice_offsets=notice_offsets,kind=kind where id=$1',[reminderCycle.id]);
+  await q('update deadlines set satisfied_at=null where id=$1',[reminderCycle.id]);
+ });
+ assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+});
+await check('archive restore renews only an eligible deadline and combined schedule reopen bumps once',async()=>{
+ const before=await enqueueCycle(reminderCycle.revision);
+ await role('authenticated',user,async()=>{
+  await q('update deadlines set archived_at=now() where id=$1',[reminderCycle.id]);
+  assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+  await q('update deadlines set archived_at=null where id=$1',[reminderCycle.id]);
+ });
+ reminderCycle.revision++;
+ assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+ assert.equal((await one('select state from reminder_deliveries where id=$1',[before.id])).state,'cancelled');
+ const restored=await enqueueCycle(reminderCycle.revision);
+ assert.notEqual(restored.id,before.id);
+ assert.notEqual(restored.idempotency_key,before.idempotency_key);
+ assert.equal((await enqueueCycle(reminderCycle.revision)).id,restored.id);
+ await role('authenticated',user,async()=>{
+  await q('select satisfy_deadline($1)',[reminderCycle.id]);
+  await q('update deadlines set archived_at=now() where id=$1',[reminderCycle.id]);
+  await q('update deadlines set archived_at=null where id=$1',[reminderCycle.id]);
+  assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+ });
+ assert.equal(await enqueueCycle(reminderCycle.revision),null);
+ await role('authenticated',user,async()=>{
+  await q('update deadlines set satisfied_at=null,due_date=due_date+1 where id=$1',[reminderCycle.id]);
+ });
+ reminderCycle.revision++;
+ assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+});
+await check('invalidating shared deadline evidence renews its occurrence exactly once',async()=>{
+ const before=await enqueueCycle(reminderCycle.revision);
+ await role('authenticated',user,async()=>{
+  const req=await one("insert into document_requirements(project_id,deadline_id,label) values($1,$2,'Additional signed evidence') returning id",[reminderCycle.project_id,reminderCycle.id]);
+  await q('select verify_document_requirement($1,$2)',[req.id,reminderCycle.version_id]);
+  await q('select satisfy_deadline($1)',[reminderCycle.id]);
+  await q('select invalidate_document_version($1)',[reminderCycle.version_id]);
+ });
+ reminderCycle.revision++;
+ const reopened=await one('select * from deadlines where id=$1',[reminderCycle.id]);
+ assert.equal(reopened.revision,reminderCycle.revision);
+ assert.equal(reopened.satisfied_at,null);
+ assert.equal(reopened.satisfied_by,null);
+ assert.equal((await one('select count(*)::int n from document_requirements where deadline_id=$1 and verified_version_id is null',[reminderCycle.id])).n,2);
+ assert.equal((await one('select state from reminder_deliveries where id=$1',[before.id])).state,'cancelled');
+ const fresh=await enqueueCycle(reminderCycle.revision);
+ assert.notEqual(fresh.id,before.id);
+ assert.notEqual(fresh.idempotency_key,before.idempotency_key);
+ assert.equal((await enqueueCycle(reminderCycle.revision)).id,fresh.id);
+ await role('authenticated',user,async()=>{ await q('select invalidate_document_version($1)',[reminderCycle.version_id]); });
+ assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+ assert.deepEqual(await one('select * from reminder_deliveries where id=$1',[reminderCycle.sent.id]),reminderCycle.sent);
+ assert.deepEqual(await q('select * from reminder_attempts where delivery_id=$1',[reminderCycle.sent.id]),reminderCycle.attempts);
+});
+await check('recipient changes still bump revisions and cancel prior cycle requests',async()=>{
+ const before=await enqueueCycle(reminderCycle.revision);
+ await role('authenticated',user,async()=>{ await q('delete from deadline_recipients where deadline_id=$1 and staff_id=$2',[reminderCycle.id,staff.id]); });
+ reminderCycle.revision++;
+ assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+ assert.equal((await one('select state from reminder_deliveries where id=$1',[before.id])).state,'cancelled');
+ await role('authenticated',user,async()=>{ await q('insert into deadline_recipients(deadline_id,staff_id) values($1,$2)',[reminderCycle.id,staff.id]); });
+ reminderCycle.revision++;
+ assert.equal((await one('select revision from deadlines where id=$1',[reminderCycle.id])).revision,reminderCycle.revision);
+});
 await check('atomic group save validates stable parent hierarchy and rolls back invalid replacement',async()=>role('authenticated',user,async()=>{
  const source=await one('select id from preset_tasks where archived_at is null limit 1');
  const rootid='20000000-0000-4000-8000-000000000001', childid='20000000-0000-4000-8000-000000000002';
