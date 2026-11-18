@@ -1,0 +1,137 @@
+# Complyete V1 architecture and implementation plan
+
+## 1. Delivery target and architecture
+
+Deliver a staff-only prototype for **November 18, 8PM Eastern**, prioritizing reminders, configurable task presets, project documents, and the client directory. Include projects, tasks, and the call log as supporting workflows.
+
+Your latest answers expand V1 to include **configurable intake fields in presets**. Client accounts, maps, calendars, billing, time tracking, and electronic signature collection remain excluded.
+
+```mermaid
+flowchart LR
+    Staff[ESE staff browser] --> App[Next.js app on Cloudflare Workers]
+    App --> Auth[Supabase Auth]
+    App --> DB[PostgreSQL with staff access policies]
+    Staff --> Storage[Private Supabase Storage]
+    App --> Storage
+    Cron[Supabase Cron] --> Job[Reminder Edge Function]
+    Job --> DB
+    Job --> Resend[Resend]
+    Resend --> Inbox[Staff inboxes / demonstration inbox]
+```
+
+**Application decisions**
+
+- Reuse the existing repository, App Router, TypeScript, and Tailwind. Use a restrained office interface with searchable tables, clear forms, confirmation dialogs, and prominent overdue/paperwork indicators.
+- Use Next.js server functions for validation and record changes, with a user-authenticated Supabase client. Enforce permissions again in PostgreSQL and Storage.
+- Use **Cloudflare Workers with Vinext**, Cloudflare’s currently recommended Next.js-compatible deployment path. Retain conventional Next.js development scripts. Compatibility with this repository must pass the first implementation gate; Vinext is currently beta. [Cloudflare guidance](https://developers.cloudflare.com/workers/framework-guides/web-apps/nextjs/)
+- Use **Supabase Cron → Edge Function → Resend** for reminders, keeping background processing independent of the application host. [Scheduling documentation](https://supabase.com/docs/guides/functions/schedule-functions)
+- Upload files directly to private Supabase Storage through narrowly authorized uploads, avoiding file buffering in Cloudflare.
+- No public registration. Thadd provisions/disables accounts through Supabase initially. Staff can change their own email/password through Supabase Auth.
+- Every data operation requires an authenticated, active staff record. Removing staff access takes effect through database policies even if an Auth session remains valid.
+
+**Routes**
+
+`/` shows work needing attention. `/clients`, `/calls`, `/projects`, `/tasks`, and `/documents` provide the five core views. `/projects/[id]` contains intake, tasks, documents, and deadlines. `/presets` manages reusable definitions; `/account` manages login details.
+
+## 2. Database schema and access contracts
+
+Keep the existing `clients.id` bigint key. Use UUIDs for new entity IDs, UTC timestamps for events, and PostgreSQL `date` values for office deadlines. Foreign keys preserve linked history; application deletion is archival.
+
+| Tables | Principal fields and relationships |
+|---|---|
+| `staff` | ID, optional unique Auth user ID, display name, email, active flag, administrator flag. Historical staff can exist without login access. |
+| `clients` | Existing fields plus company, cell phone, billing address, contact notes, referral source, optional unique office client number, archival fields. |
+| `projects` | Client FK, office prefix, legacy project number, property address, details, service selections, status, notes, timeframe, first-contact/proposal/filing dates, import provenance, historical-completion flag. Legacy project numbers are **not unique keys**. |
+| `project_staff` | Project/staff join table supporting multiple assignments. |
+| `call_logs` | Caller/contact details, call time, summary, recording staff, optional client/project links, deletion timestamp and actor. |
+| `call_updates` | Call FK, follow-up text, author, timestamp, deletion timestamp and actor. Original conversation and later outcomes remain separate. |
+| `preset_tasks` | Name, description, work category, completion/document requirements, intake-field definitions, revision, archival fields. |
+| `preset_groups`, `preset_group_items` | Named groups, group intake fields, ordered references to reusable tasks, revision. |
+| `project_preset_applications` | Project FK, source preset/revision, immutable definition snapshot, intake answers, application timestamp and actor. |
+| `tasks`, `task_staff` | Project FK, description, fieldwork/paperwork/other category, status, due date, multiple assignees, required flag, source snapshot reference, completion metadata. |
+| `documents` | Project FK, title, category, optional subtype, archival fields. |
+| `document_versions` | Document FK, immutable object path, original filename, media type, byte size, uploader, upload state/time, filing/hearing/issuance/closure dates. |
+| `document_requirements` | Project FK, optional task/deadline FK, required document description/category, verified document-version FK, verifying staff and timestamp. |
+| `deadlines` | Project FK, permit/final-sign-off type, label, due date, three notice offsets, revision, satisfied timestamp and actor. |
+| `deadline_recipients` | Deadline/staff join table; only active staff with email addresses are selectable. |
+| `reminder_deliveries` | Deadline/revision, stage, occurrence date, effective recipient, immutable email payload, state, attempt count, lease/retry timestamps, provider ID. Unique occurrence key prevents duplicate scheduling. |
+| `reminder_attempts` | Delivery FK, attempt time, result/error, provider response identifiers. |
+| `import_runs`, `import_rows` | Workbook checksum, sheet/row coordinates, original values, mapped records, validation flags, counts. |
+| `audit_events` | Actor, action, entity, timestamp, and relevant change metadata. Staff cannot alter audit history. |
+
+**Database-enforced interfaces**
+
+- `apply_preset(...)` atomically snapshots definitions, validates supplied intake answers, and creates independent project tasks/requirements.
+- `verify_document_requirement(...)` verifies that the uploaded version belongs to the same project and records staff attestation.
+- `complete_project(...)` rejects completion while required intake answers, tasks, document verification, or deadline paperwork remain outstanding.
+- Reminder claim/result functions provide transactional delivery leasing and status updates.
+- Database constraints/triggers enforce these rules against direct database API calls as well as the interface.
+
+All active staff may manage operational records and presets. Staff cannot activate accounts, grant themselves administrator access, edit audit records, or invoke privileged reminder operations.
+
+## 3. Required behavior and integration details
+
+**Clients, calls, and project completion**
+
+- Archive/restore clients without removing their projects or call history. Archiving a client does not silently cancel outstanding project reminders.
+- Call follow-ups are timestamped additions. Deletion requires confirmation and leaves a visible tombstone with deletion time and actor; authorized staff can inspect retained history.
+- Keep fieldwork and paperwork as distinct tasks. Task defaults are To do, In progress, Blocked, Awaiting paperwork, and Completed.
+- Signed paperwork means an uploaded document that staff explicitly verify; V1 does not collect signatures or infer them from file contents.
+- Invalidating required evidence reopens the affected requirement and any verified completion dependent on it.
+
+**Presets and intake**
+
+- Every active staff member can create, edit, archive, and apply tasks/groups.
+- Support text, multiline text, number, date, choice, and yes/no intake fields, with labels, stable IDs, required flags, ordering, and choice options.
+- Applying a preset copies its tasks, requirements, and field definitions. Later template edits affect subsequent applications only.
+- Allow incomplete intake drafts; identify missing required answers and block project completion.
+- Search client/project details and saved intake labels/answers. No conditional form logic or general workflow builder in V1.
+
+**Documents**
+
+- Categories: Proposal, Transmittal, Filings, Permits, Compliance docs, Other.
+- Accept PDF, DOCX, XLSX, JPG/JPEG, PNG, DWG, DXF, and ZIP, capped at **25,000,000 bytes per file**.
+- Store each replacement as an immutable version. All active staff may archive/restore documents; no permanent-delete interface.
+- Authorize upload initiation and finalization; verify stored size before marking a version available. Use generated storage paths rather than user-supplied paths.
+- Authorize each download request and issue a short-lived signed URL. Download CAD/ZIP files as attachments.
+- Verification refers to a particular version; replacing a document does not automatically verify its replacement.
+
+**Spreadsheet import**
+
+- Import 557 project records.
+- Preserve each project row separately, including repeated project numbers and addresses. Group clients only by an identical trimmed source client label; flag possible identity collisions rather than using fuzzy matching.
+- Retain all original values and sheet/row provenance. Preserve invalid dates as source text with review flags; leave the structured date empty.
+- Preserve original status text alongside normalized display status. Do not infer completion from the sheet name.
+- Mark imported completion claims as **historical, unverified**. New completion transitions require the current evidence checks.
+- Preserve non-person assignment labels such as “Field” as source information; do not create login accounts from spreadsheet names.
+- Do not invent expiration dates from filing dates or notes. Importing historical records must not trigger a flood of reminders.
+- Make rerunning the same workbook idempotent through checksum/sheet/row identity. Archive the two starter test clients.
+- Keep the source workbook and generated import payloads out of Git.
+
+**Reminder processing**
+
+- Default notices: **30, 14, and 3 days before**; then daily overdue reminders at **9 a.m. America/New_York**. Offsets are editable.
+- Run the job every five minutes; calculate office dates correctly across daylight-saving changes.
+- Stop each deadline’s reminders when its own signed paperwork is verified.
+- After downtime, send the most urgent currently applicable notice instead of all missed notices.
+- Deadline edits invalidate pending deliveries and create a revised future schedule. Preserve completed send history.
+- Atomically claim deliveries, persist the exact request, and use a stable Resend idempotency key. Retry transient failures after 5, 15, and 60 minutes.
+- Flag ambiguous outcomes for review rather than blindly resending after Resend’s **24-hour idempotency window**. [Resend idempotency](https://resend.com/docs/dashboard/emails/idempotency-keys)
+- Handle quota failures as deferred work. Resend Free currently permits **100 emails/day and 3,000/month**, with recipients counted separately. Show queue failures and quota deferrals in the app. [Resend limits](https://resend.com/docs/knowledge-base/account-quotas-and-limits)
+- Demonstration mode redirects delivery to **revisa@rpi.edu**, deduplicating redirected recipients for the same notice. Preview mode displays emails without sending or marking them sent.
+
+## 4. Verification, setup placeholders, and completion criteria
+
+**Required verification**
+
+- Anonymous users, inactive staff, and forged staff-role updates cannot access records or storage.
+- Password login/logout and self-service credential changes work; public signup is disabled.
+- Import creates exactly 557 source-linked projects; rerunning creates no duplicates; malformed values remain recoverable.
+- Archival preserves links; call deletion leaves timestamps/history.
+- Applying then editing a preset leaves earlier project tasks and intake definitions unchanged.
+- Fieldwork completion cannot complete a project with missing signed paperwork. Cross-project document evidence is rejected.
+- Upload limits, version history, archival, and private downloads work.
+- Concurrent reminder runs produce one delivery per occurrence; retries, deadline edits, verification, DST, quota failures, and uncertain provider outcomes are covered.
+- Lint, type checking, meaningful automated tests, conventional Next.js build, Worker build, and browser walkthrough pass.
+
+Cloudflare Free currently allows **10 ms CPU per request**. Test representative authentication and project screens early; move import and reminder work off the Worker as planned. A local compatibility pass does not prove live free-tier performance. [Cloudflare limits](https://developers.cloudflare.com/workers/platform/limits/)
