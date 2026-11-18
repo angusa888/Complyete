@@ -15,5 +15,6 @@ enable_confirmations = true
 [storage]
 enabled = true
 file_size_limit = "25MB"
-[functions.send-reminders]
-verify_jwt = true
+[functions.dispatch-reminders]
+# Custom SHA-256 constant-time bearer-secret comparison in the function; never public work.
+verify_jwt = false
