@@ -66,15 +66,22 @@ create function public.claim_reminder_deliveries(p_limit integer default 25,p_no
  from candidates c where r.id=c.id returning r.*;
 end $$;
 create function public.record_reminder_result(p_delivery_id uuid,p_lease_token uuid,p_result text,p_provider_id text default null,p_error text default null,p_metadata jsonb default '{}',p_now timestamptz default now()) returns void language plpgsql security definer set search_path=public,pg_temp as $$
-declare r public.reminder_deliveries; delay integer; begin
+declare r public.reminder_deliveries; delay integer; retry_time timestamptz; begin
  select * into r from public.reminder_deliveries where id=p_delivery_id for update;
  if r.id is null or r.lease_token is distinct from p_lease_token or r.state not in ('leased','cancelled') then raise exception 'Lease token is no longer valid'; end if;
  if p_result not in ('sent','transient','quota','ambiguous','permanent') then raise exception 'Invalid delivery result'; end if;
+ retry_time:=p_now+interval '60 minutes';
+ if p_result='quota' and p_metadata ? 'retry_at' then
+  if jsonb_typeof(p_metadata->'retry_at')<>'string' then raise exception 'Invalid quota retry_at'; end if;
+  begin retry_time:=(p_metadata->>'retry_at')::timestamptz;
+  exception when invalid_datetime_format or datetime_field_overflow then raise exception 'Invalid quota retry_at'; end;
+  if retry_time is null or not isfinite(retry_time) or retry_time<=p_now or retry_time>p_now+interval '366 days' then raise exception 'Invalid quota retry_at'; end if;
+ end if;
  insert into public.reminder_attempts(delivery_id,attempted_at,result,error,provider_id,metadata) values(r.id,p_now,p_result,p_error,p_provider_id,p_metadata);
  delay:=case r.attempt_count when 1 then 5 when 2 then 15 else 60 end;
  update public.reminder_deliveries set
  state=case when p_result='sent' then 'sent' when r.state='cancelled' then 'cancelled' when p_result='ambiguous' then 'ambiguous' when p_result='permanent' or (p_result='transient' and r.attempt_count>=4) then 'failed' when p_result='quota' then 'deferred' else 'retry' end,
- available_at=p_now+make_interval(mins=>case when p_result='quota' then 60 else delay end),
+ available_at=case when p_result='quota' then retry_time else p_now+make_interval(mins=>delay) end,
  sent_at=case when p_result='sent' then p_now end,provider_id=coalesce(p_provider_id,r.provider_id),last_error=p_error,lease_token=null,leased_until=null where id=r.id;
 end $$;
 create function public.guard_delivery_payload() returns trigger language plpgsql set search_path=public,pg_temp as $$ begin
