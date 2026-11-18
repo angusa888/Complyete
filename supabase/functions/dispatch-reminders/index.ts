@@ -1,7 +1,5 @@
-// @ts-expect-error Deno Edge modules require explicit file extensions.
 import { buildReminderPreviews, calculateReminder, officeClock, DEMO_RECIPIENT, validEmail } from "../_shared/reminders.ts";
 import type { EmailPayload, ReminderDeadline, ReminderProject, ReminderStaff, ReminderRecipient } from "../_shared/reminders.ts";
-// @ts-expect-error Deno Edge modules require explicit file extensions.
 import { sendReminderEmail } from "../_shared/email.ts";
 import type { ProviderResult } from "../_shared/email.ts";
 

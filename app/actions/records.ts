@@ -18,7 +18,7 @@ import {
 } from '@/lib/features/validation';
 
 const clientIdSchema = z.string().regex(/^[1-9]\d*$/).transform(Number).refine(Number.isSafeInteger, 'Enter a valid client.');
-const clientStatusSchema = z.enum(['Active', 'On hold', 'Archived']);
+const projectStatusSchema = z.enum(['Active', 'On hold', 'Completed', 'Archived']);
 const taskCategorySchema = z.enum(['fieldwork', 'paperwork', 'other']);
 const taskStatusSchema = z.enum(['To do', 'In progress', 'Blocked', 'Awaiting paperwork', 'Completed']);
 
@@ -240,12 +240,15 @@ export async function updateProjectAction(_previous: ActionState, form: FormData
     const id = uuidSchema.parse(formText(form, 'id'));
     projectPath = `/projects/${id}`;
     const values = projectValues(form);
-    const status = clientStatusSchema.parse(formText(form, 'status'));
+    const status = projectStatusSchema.parse(formText(form, 'status'));
     const staffIds = staffIdsFromForm(form);
     await validateActiveStaffIds(supabase, staffIds);
     const { data: existing, error: lookupError } = await supabase.from('projects').select('id,status').eq('id', id).maybeSingle();
     if (lookupError) throw lookupError;
     if (!existing) throw new UserInputError('Project not found.');
+    if (status === 'Completed' && existing.status !== 'Completed') {
+      throw new UserInputError('Use the Complete project action so all required intake, tasks, signed documents, and deadlines are checked.');
+    }
     const savedStatus = existing.status === 'Completed' ? 'Completed' : status;
     const acceptedDate = optionalDate(form, 'proposal_accepted_date');
     const { error } = await supabase.from('projects').update({
