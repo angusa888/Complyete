@@ -1,6 +1,6 @@
 # Database and RPC contract
 
-Apply migrations 001–004 in order. All application database calls use the signed-in user JWT and public anon key. No service key in the UI. Provision Auth users and matching `staff` administratively; there is no signup or activation trigger. `staff.id` is the domain UUID, `staff.auth_user_id` matches Auth.
+Apply migrations 001–005 in order. All application database calls use the signed-in user JWT and public anon key. No service key in the UI. Provision Auth users and matching `staff` administratively; there is no signup or activation trigger. `staff.id` is the domain UUID, `staff.auth_user_id` matches Auth.
 
 ## Shared shapes
 
@@ -48,7 +48,7 @@ Mutations reject inactive users even with valid Auth JWT. Database SQLSTATE erro
 - `claim_reminder_deliveries(p_limit integer default 25,p_now timestamptz default now()) returns setof reminder_deliveries` leases with skip locked and UUID token for five minutes; increments attempt count; expired first attempts older than 23 hours become ambiguous. Never claims stale/satisfied deadlines.
 - `record_reminder_result(p_delivery_id uuid,p_lease_token uuid,p_result text,p_provider_id text default null,p_error text default null,p_metadata jsonb default '{}',p_now timestamptz default now()) returns void`. Results `sent`, `transient`, `quota`, `ambiguous`, `permanent`; transient retries 5/15/60 mins; four attempts max. Quota defaults to 60 mins, or honors `p_metadata.retry_at` (future finite timestamp within 366 days); attempts retain provider/reset metadata. Lease token required. Old unresolved deliveries still become ambiguous after 23 hours, including long quota deferrals; staff must review instead of blind resending after the provider's 24-hour idempotency window.
 
-Cron remains disabled until configured. Default office time America/New_York 09:00, every five minutes. Preview must not enqueue/claim/record. Demo service redirects to revisa@rpi.edu and deduplicates staff recipients before enqueue. The service computes the most urgent currently applicable stage only, never all missed stages. DB revises/cancels pending work when deadline scheduling/recipients change and preserves sent history.
+Cron remains disabled until configured. Default office time America/New_York 09:00, every five minutes. Preview must not enqueue/claim/record. Demo service redirects to revisa@rpi.edu and deduplicates staff recipients before enqueue. The service computes the most urgent currently applicable stage only, never all missed stages. DB revises/cancels pending work when deadline scheduling/recipients change and preserves sent history. A transition from satisfied or archived to open and unarchived increments the deadline revision once, including explicit reopening, evidence invalidation, and archive restoration. A simultaneous schedule change still increments only once; no-op updates and restoration while still satisfied do not start a new cycle. The new revision permits a fresh delivery for an otherwise identical stage/date/recipient while preserving cancelled requests, sent deliveries, their immutable payloads/provider keys, and attempt history.
 
 ## Import
 
