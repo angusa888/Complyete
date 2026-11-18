@@ -1,0 +1,19 @@
+project_id = "complyete"
+[api]
+enabled = true
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+[db]
+major_version = 17
+[auth]
+enabled = true
+enable_signup = false
+site_url = "http://localhost:3000"
+[auth.email]
+enable_signup = false
+enable_confirmations = true
+[storage]
+enabled = true
+file_size_limit = "25MB"
+[functions.send-reminders]
+verify_jwt = true
