@@ -1,0 +1,5 @@
+import {requireActiveStaff} from '@/lib/supabase/auth';
+import {updateEmailAction,updatePasswordAction} from '@/app/actions/auth';
+import {Heading,Card} from '@/components/ui';
+import {ActionForm,Field} from '@/components/action-form';
+export default async function Account(){const {staff}=await requireActiveStaff();return <><Heading title="Account" description="Manage your sign-in details."/><div className="grid"><Card title="Your profile"><p><strong>{staff.display_name}</strong></p><p className="muted">{staff.email}</p></Card><Card title="Change email"><ActionForm action={updateEmailAction} label="Update email"><Field name="email" label="New email" type="email" required/></ActionForm></Card><Card title="Change password"><ActionForm action={updatePasswordAction} label="Update password"><Field name="password" label="New password (at least 12 characters)" type="password" required/><Field name="confirmPassword" label="Confirm password" type="password" required/></ActionForm></Card></div></>}
