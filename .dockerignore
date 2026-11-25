@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+.env*
+Dockerfile
+docker-compose*.yml
+npm-debug.log
+
+supabase/migrations
+supabase/functions/dispatch-reminders
+docs
+planning
+tests
+scripts
