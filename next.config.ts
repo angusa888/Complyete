@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  ...(process.env.DOCEKR_BUILD === "1" && {output: "standalone" as const}),
   poweredByHeader: false,
 };
 
