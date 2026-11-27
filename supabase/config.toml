@@ -9,9 +9,15 @@ major_version = 17
 enabled = true
 enable_signup = false
 site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000/**"]
 [auth.email]
-enable_signup = false
+enabled = true
 enable_confirmations = true
+[remotes.production]
+project_id = "rlbqcrffhzwnwjogrzfx"
+[remotes.production.auth]
+site_url = "https://admin.ese-llc.com"
+additional_redirect_urls = ["https://admin.ese-llc.com/**"]
 [storage]
 enabled = true
 file_size_limit = "25MB"

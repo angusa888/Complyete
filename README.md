@@ -41,3 +41,6 @@ npm run build:worker
 ```
 
 These local checks do not verify live Supabase policies, Cloudflare account access, the Resend sender domain, or production delivery. Use [setup](docs/setup.md) for the deployment gates. Do not commit tracker files, generated import payloads, `.env.local`, or credentials.
+
+## Local Supabase Setup
+Start docker desktop and then run `npx supabase start` from the root. This will run all the migrations and the output will end with all the local variables you should need to run Supabase locally.
